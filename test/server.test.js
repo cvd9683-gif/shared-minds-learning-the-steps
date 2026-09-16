@@ -22,7 +22,11 @@ async function withServers(upstreamHandler, run, options = {}) {
   const upstream = http.createServer(upstreamHandler);
   await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
   const apiBase = `http://127.0.0.1:${upstream.address().port}`;
-  const app = createServer({ token: TOKEN, apiBase, ...options });
+  const app = createServer({
+    token: TOKEN, apiBase,
+    limits: { perVisitor: 99, perHour: 99, totalPerRun: 99, cooldownMs: 0 },
+    ...options,
+  });
   await new Promise((r) => app.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${app.address().port}`;
   try {
@@ -181,5 +185,78 @@ test("the server refuses to call the model more often than its own limit", async
     assert.equal(first.ok, true);
     const second = await post(base, { phrase: PHRASE });
     assert.equal(second.status, 429);
-  }, { maxCalls: 1 });
+    assert.match((await second.json()).error, /reached its limit of model calls/);
+  }, { limits: { perVisitor: 99, perHour: 99, totalPerRun: 1, cooldownMs: 0 } });
+});
+
+test("a visitor gets a small number of turns, and is told plainly when they run out", async () => {
+  let upstreamCalls = 0;
+  await withServers((req, res) => { upstreamCalls++; succeeds(GOOD)(req, res); }, async (base) => {
+    for (let i = 0; i < 2; i++) {
+      assert.equal((await post(base, { phrase: PHRASE })).status, 200, `turn ${i + 1}`);
+    }
+    const blocked = await post(base, { phrase: PHRASE });
+    assert.equal(blocked.status, 429);
+    const body = await blocked.json();
+    assert.match(body.error, /taken your 2 turns/);
+    assert.match(body.error, /teaching and replaying a phrase still work/);
+    assert.equal(upstreamCalls, 2, "the refused turn never reached Replicate");
+  }, { limits: { perVisitor: 2, perHour: 99, totalPerRun: 99, cooldownMs: 0 } });
+});
+
+test("a successful turn reports how many the visitor has left", async () => {
+  await withServers(succeeds(GOOD), async (base) => {
+    const first = await (await post(base, { phrase: PHRASE })).json();
+    assert.equal(first.turnsLeft, 2);
+    const second = await (await post(base, { phrase: PHRASE })).json();
+    assert.equal(second.turnsLeft, 1);
+  }, { limits: { perVisitor: 3, perHour: 99, totalPerRun: 99, cooldownMs: 0 } });
+});
+
+test("two handovers fired at once make one model call, not two", async () => {
+  let upstreamCalls = 0;
+  const slowUpstream = async (req, res) => {
+    upstreamCalls++;
+    await new Promise((r) => setTimeout(r, 250));   // still in flight when the twin arrives
+    succeeds(GOOD)(req, res);
+  };
+  await withServers(slowUpstream, async (base) => {
+    const [a, b] = await Promise.all([post(base, { phrase: PHRASE }), post(base, { phrase: PHRASE })]);
+    const codes = [a.status, b.status].sort();
+    assert.deepEqual(codes, [200, 409], "one answered, one refused as a duplicate");
+    const dup = a.status === 409 ? a : b;
+    assert.match((await dup.json()).error, /already being danced/);
+    assert.equal(upstreamCalls, 1, "the duplicate never reached Replicate");
+  }, { limits: { perVisitor: 99, perHour: 99, totalPerRun: 99, cooldownMs: 0 } });
+});
+
+test("a failed turn releases the visitor's lock instead of stranding them", async () => {
+  let n = 0;
+  const failsThenWorks = (req, res) => {
+    if (++n === 1) { res.writeHead(500, { "Content-Type": "application/json" }); return res.end("{}"); }
+    succeeds(GOOD)(req, res);
+  };
+  await withServers(failsThenWorks, async (base) => {
+    assert.equal((await post(base, { phrase: PHRASE })).status, 502);
+    // If the lock leaked, this would come back 409 rather than being answered.
+    assert.equal((await post(base, { phrase: PHRASE })).status, 200);
+  }, { limits: { perVisitor: 99, perHour: 99, totalPerRun: 99, cooldownMs: 0 } });
+});
+
+test("the kill switch stops calls without taking the rest of the page down", async () => {
+  let upstreamCalls = 0;
+  await withServers((req, res) => { upstreamCalls++; succeeds(GOOD)(req, res); }, async (base) => {
+    const status = await (await fetch(`${base}/api/status`)).json();
+    assert.equal(status.dancerCanAnswer, false, "the page is told up front, not at the wall");
+
+    const res = await post(base, { phrase: PHRASE });
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.match(body.error, /switched off for now/);
+    assert.match(body.error, /Teaching and replaying a phrase still work/);
+    assert.equal(upstreamCalls, 0, "nothing reached Replicate");
+
+    // The interface itself is untouched.
+    assert.equal((await fetch(`${base}/`)).status, 200);
+  }, { enabled: () => false });
 });

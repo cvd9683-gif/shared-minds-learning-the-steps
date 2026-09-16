@@ -70,10 +70,22 @@ export function parseTurn(text) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export function createContinueHandler({ token, apiBase = "https://api.replicate.com", maxCalls = 300, log = () => {} } = {}) {
-  let calls = 0;
-  let lastCallAt = 0;
+// Who is asking. Behind Render's proxy the socket address is the proxy's, so the
+// first hop of x-forwarded-for is the nearest thing to a visitor we have. It is
+// not an identity — see the limits section of the README.
+export function visitorKey(req) {
+  const fwd = req.headers["x-forwarded-for"];
+  const first = typeof fwd === "string" ? fwd.split(",")[0].trim() : "";
+  return first || req.socket?.remoteAddress || "unknown";
+}
 
+export function createContinueHandler({
+  token,
+  apiBase = "https://api.replicate.com",
+  limiter,
+  enabled = () => true,
+  log = () => {},
+} = {}) {
   return async function handleContinue(req, res) {
     const started = Date.now();
     const reply = (status, body) => {
@@ -116,18 +128,20 @@ export function createContinueHandler({ token, apiBase = "https://api.replicate.
     if (badToken) {
       return reply(500, { ok: false, error: "The dancer cannot take its turn: the API token is not usable.", setup: badToken });
     }
-    if (calls >= maxCalls) {
-      return reply(429, {
+
+    // The switch is read per request, so turning it off stops the very next one.
+    if (!enabled()) {
+      return reply(503, {
         ok: false,
-        error: `This server has reached its limit of ${maxCalls} model calls for one run.`,
-        setup: "Restart the server to reset it; the limit is MAX_MODEL_CALLS in .env.",
+        error: "The dancer's own turn is switched off for now. Teaching and replaying a phrase still work.",
+        setup: "MODEL_CALLS_ENABLED is set to off on the server.",
       });
     }
-    if (Date.now() - lastCallAt < 1000) {
-      return reply(429, { ok: false, error: "That was very quick after the last turn; give it a second and ask again." });
-    }
-    calls++;
-    lastCallAt = Date.now();
+
+    const who = visitorKey(req);
+    const verdict = limiter.check(who);
+    if (!verdict.ok) return reply(verdict.status, { ok: false, error: verdict.error });
+    limiter.began(who);
 
     const input = {
       system_prompt: SYSTEM_PROMPT,
@@ -147,7 +161,7 @@ export function createContinueHandler({ token, apiBase = "https://api.replicate.
       let prediction = await r.json().catch(() => ({}));
       if (!r.ok) {
         const detail = prediction.detail || prediction.title || `HTTP ${r.status}`;
-        return reply(502, { ok: false, error: `Replicate refused the request: ${detail}`, sent: { model: MODEL, input }, calls });
+        return reply(502, { ok: false, error: `Replicate refused the request: ${detail}`, sent: { model: MODEL, input }, calls: limiter.snapshot().total });
       }
 
       // Usually "Prefer: wait" returns the finished prediction. If not, check back a few times.
@@ -158,12 +172,12 @@ export function createContinueHandler({ token, apiBase = "https://api.replicate.
       }
       const modelMs = Date.now() - modelStarted;
       if (prediction.status !== "succeeded") {
-        return reply(502, { ok: false, error: `The prediction ${prediction.status}: ${prediction.error || "no output"}`, sent: { model: MODEL, input }, modelMs, calls });
+        return reply(502, { ok: false, error: `The prediction ${prediction.status}: ${prediction.error || "no output"}`, sent: { model: MODEL, input }, modelMs, calls: limiter.snapshot().total });
       }
 
       const raw = Array.isArray(prediction.output) ? prediction.output.join("") : String(prediction.output ?? "");
       const { plan, error } = parseTurn(raw);
-      if (error) return reply(502, { ok: false, error, raw, sent: { model: MODEL, input }, modelMs, calls });
+      if (error) return reply(502, { ok: false, error, raw, sent: { model: MODEL, input }, modelMs, calls: limiter.snapshot().total });
 
       reply(200, {
         ok: true,
@@ -173,11 +187,14 @@ export function createContinueHandler({ token, apiBase = "https://api.replicate.
         modelMs,
         predictionId: prediction.id,
         replicateMetrics: prediction.metrics ?? null,
-        calls,
+        calls: limiter.snapshot().total,
+        turnsLeft: limiter.turnsLeft(who),
       });
     } catch (err) {
       const why = err.name === "TimeoutError" ? "Replicate did not answer within 40 seconds." : `Could not reach Replicate (${err.message}).`;
-      reply(502, { ok: false, error: why, sent: { model: MODEL, input }, calls });
+      reply(502, { ok: false, error: why, sent: { model: MODEL, input }, calls: limiter.snapshot().total });
+    } finally {
+      limiter.ended(who);
     }
   };
 }

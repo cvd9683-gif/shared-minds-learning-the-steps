@@ -136,14 +136,121 @@ listens on `127.0.0.1` only, so nobody else on the network can spend your credit
 | `.env` setting | what it does |
 | --- | --- |
 | `REPLICATE_API_TOKEN` | lets the dancer take its turn; without it everything else still runs |
+| `MODEL_CALLS_ENABLED` | set to `false` to stop all new model calls |
+| `MAX_CALLS_PER_VISITOR` | turns one visitor may take per window (default 8) |
+| `VISITOR_WINDOW_MINUTES` | how long that window is (default 60) |
+| `MAX_CALLS_PER_HOUR` | ceiling across everyone (default 40) |
+| `MAX_MODEL_CALLS` | hard stop for one run of the process (default 100) |
 | `PORT` | which port to serve on (default 3000) |
-| `MAX_MODEL_CALLS` | the server stops calling the model after this many calls per run (default 300) |
+
+All of the limits reset when the process restarts — see
+[What the limits actually protect](#what-the-limits-actually-protect).
 
 None of this appears on the performance screen. The page tells a visitor what it can and
 cannot do in plain words; file names and environment variables live here, and in the
 **Development details** panel at the bottom of the page.
 
 Run the tests with `npm test` (they use a stand-in server on localhost and never call Replicate).
+
+## Putting it online (Render)
+
+The piece needs a server, because the API token must never reach the browser. Any Node
+host will do; these are the exact settings for a **Render Web Service**.
+
+| Render field | Value |
+| --- | --- |
+| Repository | `https://github.com/cvd9683-gif/shared-minds-learning-the-steps` |
+| Branch | `main` |
+| Language / Runtime | **Node** |
+| Root Directory | *(leave blank)* |
+| Build Command | `npm install` |
+| Start Command | `npm start` |
+| Instance Type | Free is enough — see the note about sleeping below |
+
+There are no dependencies to install, so the build is near-instant; `npm install` is simply
+what Render expects to run. Node 20.12 or newer is required and `package.json` declares it
+in `engines`, which Render reads.
+
+### Environment variables to set in the Render dashboard
+
+| Name | Set it to | Why |
+| --- | --- | --- |
+| `REPLICATE_API_TOKEN` | your token | **Required.** Mark it secret. It stays on the server; the browser is only ever told yes or no. |
+| `MODEL_CALLS_ENABLED` | `true`, or `false` to stop | The stop switch. Saving it restarts the service, and the next request is refused. |
+| `MAX_CALLS_PER_VISITOR` | `8` | Turns one visitor may take per window. |
+| `VISITOR_WINDOW_MINUTES` | `60` | How long that window is. |
+| `MAX_CALLS_PER_HOUR` | `40` | Ceiling across everyone. |
+| `MAX_MODEL_CALLS` | `100` | Hard stop for one run of the process. |
+
+Everything except the token is optional; the defaults above are what the code uses anyway.
+
+**Do not set `PORT` or `HOST` on Render.** Render sets `PORT` itself and the server reads it.
+Render also sets `RENDER`, which is how the server knows to bind `0.0.0.0` instead of
+loopback. Setting `PORT` by hand is the usual reason a Node service on Render never passes
+its health check.
+
+### Testing the deployed URL
+
+With `https://YOUR-SERVICE.onrender.com` in place of the placeholder:
+
+1. **Is it up and is the token loaded?**
+   ```bash
+   curl -s https://YOUR-SERVICE.onrender.com/api/status
+   # {"dancerCanAnswer":true,"model":"anthropic/claude-4.5-haiku"}
+   ```
+   `false` means either no token, a token with a stray character in it, or
+   `MODEL_CALLS_ENABLED` switched off. The service log says which.
+2. **Does the interface load?** Open the URL. You should get the dancer and the five keys.
+3. **Does a real turn work?** Play four moves with the arrow keys and the space bar, press
+   **Dancer's turn**. Render's log prints one line per turn:
+   ```
+   [continue] ok    1736 ms   6 moves: step_right, bounce, spin, hold, pulse, jump
+   ```
+4. **Does the stop switch work?** Set `MODEL_CALLS_ENABLED=false` and save. After the
+   restart, `/api/status` reports `dancerCanAnswer: false`, the page says the dancer's turn
+   is unavailable, and teaching and replay still work.
+
+The first visit after a quiet spell on the free tier takes 30–60 seconds while Render wakes
+the service. Nothing is broken; it is just cold.
+
+## What the limits actually protect
+
+Be clear-eyed about this before handing the link to a class.
+
+**Every counter lives in memory, in one process.** There is no database. That means:
+
+- **A restart resets everything.** Deploys restart. Crashes restart. On the free tier the
+  service sleeps after about 15 minutes of no traffic and restarts on the next visit. Each
+  restart hands out a fresh `MAX_MODEL_CALLS`, a fresh hourly count, and fresh per-visitor
+  counts for everybody.
+- **"Per visitor" means per IP address**, taken from the first hop of `X-Forwarded-For`.
+  That is friction, not identity. Classmates behind one campus or building NAT may share a
+  limit and block each other; the same person on wifi and then on mobile data gets two
+  allowances. Anyone who wants to get around it can.
+- **If Render ever runs more than one instance**, each has its own counters, and the real
+  totals are multiplied by the number of instances.
+
+**What that costs in practice.** A turn is about **$0.001**. While the service stays up,
+`MAX_MODEL_CALLS=100` is the binding limit: roughly **10 cents per run**. The hourly
+ceiling of 40 works out to about **4 cents an hour** of continuous use. A class of twenty
+taking their 8 turns each is about **16 cents**. The uncomfortable case is many restarts
+over a long period, since each one starts the budget again.
+
+**So the only limit that cannot be reset by a restart is the one on Replicate's side.**
+Before sharing the link, set a spend limit on your Replicate account. The controls in this
+repository are there to stop ordinary over-use and accidental double-clicks; they are not a
+substitute for a spending cap, and this README would be lying if it said otherwise.
+
+If something goes wrong, `MODEL_CALLS_ENABLED=false` stops new calls within one restart,
+and revoking the token at <https://replicate.com/account/api-tokens> stops them immediately.
+
+### Duplicate turns
+
+Pressing **Dancer's turn** twice, or having the page open in two tabs, does not buy two
+model calls. The browser refuses to start a second request while one is running, and the
+server independently refuses any request from a visitor who already has one in flight,
+before it reaches Replicate. Both halves are covered by tests — including one that fires
+two handovers simultaneously and asserts exactly one call goes out.
 
 ## The model, and what it costs
 
@@ -167,8 +274,10 @@ thirty turns is around 3 cents.
 Replicate shows the current per-token price on the model page itself, and the figures above
 could not be read off it automatically (the page renders its pricing in the browser), so
 check <https://replicate.com/anthropic/claude-4.5-haiku> before a long session. As a safety
-net the server stops after `MAX_MODEL_CALLS` calls per run and refuses more than one call
-per second.
+net the server limits how many turns one visitor may take, how many everyone may take in an
+hour, and how many one run of the process may make at all. None of that survives a restart,
+which is why [What the limits actually protect](#what-the-limits-actually-protect) asks you
+to set a spend limit on Replicate as well.
 
 **Verified schema.** The model is at version `1ad171f6…` and takes exactly three inputs:
 `prompt`, `system_prompt`, and `max_tokens` (minimum 1, maximum 8192, default 8192). This
@@ -234,6 +343,7 @@ It never prints the token, and never prints the prompt.
 | --- | --- |
 | `server.js` | serves `public/`, routes `/api/continue`, holds the token |
 | `phrase-api.js` | builds the prompt, calls Replicate, checks the answer is danceable |
+| `limits.js` | who may ask for a turn and how often, and the stop switch (no DOM, tested) |
 | `public/js/phrase.js` | the moves, reading a phrase, checking a continuation (no DOM, tested) |
 | `public/js/main.js` | the state machine: teaching, thinking, the dancer's turn, and after |
 | `public/js/input.js` | the five keys and the five buttons |
@@ -242,6 +352,7 @@ It never prints the token, and never prints the prompt.
 | `public/js/score.js` | writing a phrase down so two can be read against each other |
 | `public/js/log.js` | the request log under "Development details" |
 | `public/pose.html` | a scratch page that draws the figure in each pose, for working on the drawing |
+| `test/` | `phrase`, `limits` and `server` suites — none of them call Replicate |
 
 `public/pose.html` takes `?moves=jump@0.5,drop@0.85` — a move, and optionally how far
 through it to freeze — which is the quickest way to look at an animation you are changing.
