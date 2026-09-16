@@ -1,0 +1,18 @@
+# Kept out of the deployment. Everything here is for developing or reading the
+# project, not for serving it.
+
+# The local development server. Vercel turns a root server.js into a single
+# whole-app function, which would route every static file through it and fight
+# with the functions in api/ — the file is named dev-server.js for that reason,
+# and is excluded as well.
+/dev-server.js
+
+# The GitHub Pages entry point. On Vercel the site root is public/ already, so
+# this redirect would be dead weight. Anchored with a slash so it cannot match
+# public/index.html.
+/index.html
+
+/test
+/docs
+/previews
+/.github

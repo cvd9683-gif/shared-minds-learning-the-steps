@@ -79,123 +79,166 @@ export function visitorKey(req) {
   return first || req.socket?.remoteAddress || "unknown";
 }
 
-export function createContinueHandler({
+// Our own ceiling on one turn. It has to sit comfortably under whatever the host
+// allows a request to run for, so that a slow answer produces the honest message
+// below rather than the platform killing the function and returning an opaque
+// gateway error with nothing in it a visitor can read.
+export const TURN_TIMEOUT_MS = 30_000;
+const REPLICATE_WAIT_SECONDS = 25;
+
+// The whole of a turn, with no HTTP in it.
+//
+// Give it a parsed body and a string for who is asking; get back a status and a
+// body to send. The local development server and the deployed function are both
+// thin wrappers around this, so there is one copy of the logic and one set of
+// tests for it.
+export async function runTurn({
+  body,
+  visitor = "unknown",
   token,
   apiBase = "https://api.replicate.com",
   limiter,
   enabled = () => true,
   log = () => {},
-} = {}) {
+}) {
+  const started = Date.now();
+  const done = (status, payload) => {
+    const ms = Date.now() - started;
+    log(status === 200
+      ? `ok    ${ms} ms   ${payload.plan.moves.length} moves: ${payload.plan.moves.map((m) => m.move).join(", ")}`
+      : `FAILED ${status} after ${ms} ms — ${payload.error}${payload.setup ? ` (${payload.setup})` : ""}`);
+    return { status, body: { ...payload, serverMs: ms } };
+  };
+
+  const phrase = body?.phrase;
+  const shapeOk = Array.isArray(phrase) && phrase.length >= 2 && phrase.length <= 24
+    && phrase.every((m) => ALL_MOVES.includes(m?.move) && Number.isFinite(m?.after_ms));
+  if (!shapeOk) {
+    return done(400, { ok: false, error: "Send a phrase of 2 to 24 moves, each with a move name and a gap." });
+  }
+
+  // Test switches from the "Development details" panel. They are labelled as
+  // tests there, and they never dress themselves up as a model answer.
+  if (body.test?.fail) {
+    return done(503, { ok: false, error: "Test failure switched on. The model was not called." });
+  }
+  const delay = Math.min(12000, Math.max(0, Number(body.test?.delayMs) || 0));
+  if (delay) await sleep(delay);
+
+  if (!token) {
+    return done(500, {
+      ok: false,
+      error: "This copy has no model configured, so the dancer cannot take its own turn.",
+      setup: "Set REPLICATE_API_TOKEN in the environment and restart — see the README.",
+    });
+  }
+  const badToken = tokenProblem(token);
+  if (badToken) {
+    return done(500, { ok: false, error: "The dancer cannot take its turn: the API token is not usable.", setup: badToken });
+  }
+
+  // The switch is read per request, so turning it off stops the very next one.
+  if (!enabled()) {
+    return done(503, {
+      ok: false,
+      error: "The dancer's own turn is switched off for now. Teaching and replaying a phrase still work.",
+      setup: "MODEL_CALLS_ENABLED is set to off on the server.",
+    });
+  }
+
+  const verdict = limiter.check(visitor);
+  if (!verdict.ok) return done(verdict.status, { ok: false, error: verdict.error });
+  limiter.began(visitor);
+
+  const input = {
+    system_prompt: SYSTEM_PROMPT,
+    prompt: buildPrompt(phrase),
+    max_tokens: 1024, // the schema allows 1 to 8192; a reply uses about 120
+  };
+  const sent = { model: MODEL, input };
+
+  const modelStarted = Date.now();
+  try {
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Prefer: `wait=${REPLICATE_WAIT_SECONDS}`,
+    };
+    let r = await fetch(`${apiBase}/v1/models/${MODEL}/predictions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ input }),
+      signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
+    });
+    let prediction = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const detail = prediction.detail || prediction.title || `HTTP ${r.status}`;
+      return done(502, { ok: false, error: `Replicate refused the request: ${detail}`, sent, calls: limiter.snapshot().total });
+    }
+
+    // Usually "Prefer: wait" returns the finished prediction. If not, check back
+    // until our own deadline, leaving room to answer before it is reached.
+    const deadline = modelStarted + TURN_TIMEOUT_MS - 3000;
+    while (["starting", "processing"].includes(prediction.status) && Date.now() < deadline) {
+      await sleep(400);
+      r = await fetch(prediction.urls.get, { headers: { Authorization: `Bearer ${token}` } });
+      prediction = await r.json();
+    }
+    const modelMs = Date.now() - modelStarted;
+    if (["starting", "processing"].includes(prediction.status)) {
+      return done(504, {
+        ok: false,
+        error: `The model was still thinking after ${Math.round(TURN_TIMEOUT_MS / 1000)} seconds, so the turn was given up on. Your phrase is still here.`,
+        sent, modelMs, calls: limiter.snapshot().total,
+      });
+    }
+    if (prediction.status !== "succeeded") {
+      return done(502, { ok: false, error: `The prediction ${prediction.status}: ${prediction.error || "no output"}`, sent, modelMs, calls: limiter.snapshot().total });
+    }
+
+    const raw = Array.isArray(prediction.output) ? prediction.output.join("") : String(prediction.output ?? "");
+    const { plan, error } = parseTurn(raw);
+    if (error) return done(502, { ok: false, error, raw, sent, modelMs, calls: limiter.snapshot().total });
+
+    return done(200, {
+      ok: true,
+      plan,
+      raw,
+      sent,
+      modelMs,
+      predictionId: prediction.id,
+      replicateMetrics: prediction.metrics ?? null,
+      calls: limiter.snapshot().total,
+      turnsLeft: limiter.turnsLeft(visitor),
+    });
+  } catch (err) {
+    const why = err.name === "TimeoutError" || err.name === "AbortError"
+      ? `Replicate did not answer within ${Math.round(TURN_TIMEOUT_MS / 1000)} seconds. Your phrase is still here.`
+      : `Could not reach Replicate (${err.message}).`;
+    return done(502, { ok: false, error: why, sent, calls: limiter.snapshot().total });
+  } finally {
+    // However this ended, the visitor's in-flight lock has to come off, or one
+    // failed turn would shut them out until the process restarts.
+    limiter.ended(visitor);
+  }
+}
+
+// The Node http adapter: used by the local development server and by the tests.
+export function createContinueHandler(options = {}) {
   return async function handleContinue(req, res) {
-    const started = Date.now();
-    const reply = (status, body) => {
-      const ms = Date.now() - started;
-      log(status === 200
-        ? `ok    ${ms} ms   ${body.plan.moves.length} moves: ${body.plan.moves.map((m) => m.move).join(", ")}`
-        : `FAILED ${status} after ${ms} ms — ${body.error}${body.setup ? ` (${body.setup})` : ""}`);
+    const send = (status, payload) => {
       res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ ...body, serverMs: ms }));
+      res.end(JSON.stringify(payload));
     };
 
     let body;
     try {
       body = JSON.parse(await readBody(req));
     } catch {
-      return reply(400, { ok: false, error: "The request body was not JSON." });
+      return send(400, { ok: false, error: "The request body was not JSON." });
     }
-
-    const phrase = body.phrase;
-    const shapeOk = Array.isArray(phrase) && phrase.length >= 2 && phrase.length <= 24
-      && phrase.every((m) => ALL_MOVES.includes(m?.move) && Number.isFinite(m?.after_ms));
-    if (!shapeOk) return reply(400, { ok: false, error: "Send a phrase of 2 to 24 moves, each with a move name and a gap." });
-
-    // Test switches from the "Development details" panel. They are labelled as
-    // tests there, and they never dress themselves up as a model answer.
-    if (body.test?.fail) {
-      return reply(503, { ok: false, error: "Test failure switched on. The model was not called." });
-    }
-    const delay = Math.min(12000, Math.max(0, Number(body.test?.delayMs) || 0));
-    if (delay) await sleep(delay);
-
-    if (!token) {
-      return reply(500, {
-        ok: false,
-        error: "This copy has no model configured, so the dancer cannot take its own turn.",
-        setup: "Set REPLICATE_API_TOKEN in .env and restart the server — see the README.",
-      });
-    }
-    const badToken = tokenProblem(token);
-    if (badToken) {
-      return reply(500, { ok: false, error: "The dancer cannot take its turn: the API token is not usable.", setup: badToken });
-    }
-
-    // The switch is read per request, so turning it off stops the very next one.
-    if (!enabled()) {
-      return reply(503, {
-        ok: false,
-        error: "The dancer's own turn is switched off for now. Teaching and replaying a phrase still work.",
-        setup: "MODEL_CALLS_ENABLED is set to off on the server.",
-      });
-    }
-
-    const who = visitorKey(req);
-    const verdict = limiter.check(who);
-    if (!verdict.ok) return reply(verdict.status, { ok: false, error: verdict.error });
-    limiter.began(who);
-
-    const input = {
-      system_prompt: SYSTEM_PROMPT,
-      prompt: buildPrompt(phrase),
-      max_tokens: 1024, // the schema allows 1 to 8192; a reply uses about 120
-    };
-
-    const modelStarted = Date.now();
-    try {
-      const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Prefer: "wait=30" };
-      let r = await fetch(`${apiBase}/v1/models/${MODEL}/predictions`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ input }),
-        signal: AbortSignal.timeout(40000),
-      });
-      let prediction = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        const detail = prediction.detail || prediction.title || `HTTP ${r.status}`;
-        return reply(502, { ok: false, error: `Replicate refused the request: ${detail}`, sent: { model: MODEL, input }, calls: limiter.snapshot().total });
-      }
-
-      // Usually "Prefer: wait" returns the finished prediction. If not, check back a few times.
-      while (["starting", "processing"].includes(prediction.status) && Date.now() - modelStarted < 38000) {
-        await sleep(400);
-        r = await fetch(prediction.urls.get, { headers: { Authorization: `Bearer ${token}` } });
-        prediction = await r.json();
-      }
-      const modelMs = Date.now() - modelStarted;
-      if (prediction.status !== "succeeded") {
-        return reply(502, { ok: false, error: `The prediction ${prediction.status}: ${prediction.error || "no output"}`, sent: { model: MODEL, input }, modelMs, calls: limiter.snapshot().total });
-      }
-
-      const raw = Array.isArray(prediction.output) ? prediction.output.join("") : String(prediction.output ?? "");
-      const { plan, error } = parseTurn(raw);
-      if (error) return reply(502, { ok: false, error, raw, sent: { model: MODEL, input }, modelMs, calls: limiter.snapshot().total });
-
-      reply(200, {
-        ok: true,
-        plan,
-        raw,
-        sent: { model: MODEL, input },
-        modelMs,
-        predictionId: prediction.id,
-        replicateMetrics: prediction.metrics ?? null,
-        calls: limiter.snapshot().total,
-        turnsLeft: limiter.turnsLeft(who),
-      });
-    } catch (err) {
-      const why = err.name === "TimeoutError" ? "Replicate did not answer within 40 seconds." : `Could not reach Replicate (${err.message}).`;
-      reply(502, { ok: false, error: why, sent: { model: MODEL, input }, calls: limiter.snapshot().total });
-    } finally {
-      limiter.ended(who);
-    }
+    const result = await runTurn({ ...options, body, visitor: visitorKey(req) });
+    send(result.status, result.body);
   };
 }
 

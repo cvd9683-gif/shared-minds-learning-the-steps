@@ -81,6 +81,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     windowMs: num("VISITOR_WINDOW_MINUTES", 60) * 60 * 1000,
     perHour: num("MAX_CALLS_PER_HOUR", 40),
     totalPerRun: num("MAX_MODEL_CALLS", 100),
+    cooldownMs: Number(process.env.TURN_COOLDOWN_MS ?? 1500),
   };
   // Read fresh on every request, so flipping it and restarting is enough.
   const enabled = () => callsEnabled(process.env.MODEL_CALLS_ENABLED);

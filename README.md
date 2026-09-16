@@ -98,6 +98,10 @@ hand-over button lights up to *offer*, but only you end the turn.
 You need Node 20.12 or newer (`node -v`). There is nothing to install: no dependencies,
 no build step, no framework.
 
+`npm start` runs `dev-server.js`, which serves the page and both endpoints from a single
+process. Deployed, those endpoints are the two files in `api/` instead, and both routes run
+the same code — see [Putting it online](#putting-it-online-vercel).
+
 ```bash
 git clone https://github.com/cvd9683-gif/shared-minds-learning-the-steps.git
 cd learning-the-steps
@@ -148,7 +152,8 @@ listens on `127.0.0.1` only, so nobody else on the network can spend your credit
 | `VISITOR_WINDOW_MINUTES` | how long that window is (default 60) |
 | `MAX_CALLS_PER_HOUR` | ceiling across everyone (default 40) |
 | `MAX_MODEL_CALLS` | hard stop for one run of the process (default 100) |
-| `PORT` | which port to serve on (default 3000) |
+| `TURN_COOLDOWN_MS` | quiet time between one visitor's turns (default 1500) |
+| `PORT` | which port to serve on locally (default 3000) |
 
 All of the limits reset when the process restarts — see
 [What the limits actually protect](#what-the-limits-actually-protect).
@@ -159,105 +164,158 @@ cannot do in plain words; file names and environment variables live here, and in
 
 Run the tests with `npm test` (they use a stand-in server on localhost and never call Replicate).
 
-## Putting it online (Render)
+## Putting it online (Vercel)
 
-The piece needs a server, because the API token must never reach the browser. Any Node
-host will do; these are the exact settings for a **Render Web Service**.
+The piece needs a server, because the API token must never reach the browser. On Vercel the
+shape is: `public/` is served as static files from the CDN, and the two endpoints are
+[Vercel Functions](https://vercel.com/docs/functions) in `api/`. Both call the same
+`runTurn()` in `phrase-api.js` that the local server calls, so there is one copy of the
+logic and one set of tests for it.
 
-| Render field | Value |
+### Project settings
+
+| Vercel field | Value |
 | --- | --- |
-| Repository | `https://github.com/cvd9683-gif/shared-minds-learning-the-steps` |
-| Branch | `main` |
-| Language / Runtime | **Node** |
-| Root Directory | *(leave blank)* |
-| Build Command | `npm install` |
-| Start Command | `npm start` |
-| Instance Type | Free is enough — see the note about sleeping below |
+| Repository | `cvd9683-gif/shared-minds-learning-the-steps` |
+| Framework Preset | **Other** |
+| Root Directory | `./` *(leave as the repository root)* |
+| Build Command | *leave empty* — there is nothing to build |
+| Output Directory | `public` |
+| Install Command | *leave default* |
 
-There are no dependencies to install, so the build is near-instant; `npm install` is simply
-what Render expects to run. Node 20.12 or newer is required and `package.json` declares it
-in `engines`, which Render reads.
+`vercel.json` already sets `outputDirectory` and the function durations, so an import with
+the defaults should pick them up. The table is what those settings look like in the
+dashboard, in case you need to check or correct them.
 
-### Environment variables to set in the Render dashboard
+```json
+{
+  "outputDirectory": "public",
+  "functions": {
+    "api/continue.js": { "maxDuration": 60 },
+    "api/status.js": { "maxDuration": 10 }
+  }
+}
+```
 
-| Name | Set it to | Why |
+`public` as the output directory is what makes the dancer load at the root URL rather than
+this README. The page's own links are relative — `style.css`, `js/main.js` — so they resolve
+under the same root, and the browser only ever calls `/api/status` and `/api/continue` as
+same-origin relative paths. There is no API base URL anywhere in the front-end code.
+
+### Environment variables
+
+Add these under **Settings → Environment Variables**. Mark the token **Sensitive** so it
+cannot be read back out of the dashboard.
+
+| Name | Value | |
 | --- | --- | --- |
-| `REPLICATE_API_TOKEN` | your token | **Required.** Mark it secret. It stays on the server; the browser is only ever told yes or no. |
-| `MODEL_CALLS_ENABLED` | `true`, or `false` to stop | The stop switch. Saving it restarts the service, and the next request is refused. |
-| `MAX_CALLS_PER_VISITOR` | `8` | Turns one visitor may take per window. |
+| `REPLICATE_API_TOKEN` | your token | **Required.** Server-side only. |
+| `MODEL_CALLS_ENABLED` | `false` to stop | The stop switch. |
+| `MAX_CALLS_PER_VISITOR` | `8` | Turns one caller may take per window. |
 | `VISITOR_WINDOW_MINUTES` | `60` | How long that window is. |
-| `MAX_CALLS_PER_HOUR` | `40` | Ceiling across everyone. |
-| `MAX_MODEL_CALLS` | `100` | Hard stop for one run of the process. |
+| `MAX_CALLS_PER_HOUR` | `40` | Ceiling across everyone, per instance. |
+| `MAX_MODEL_CALLS` | `100` | Hard stop for one instance. |
+| `TURN_COOLDOWN_MS` | `1500` | Quiet time between one caller's turns. |
 
-Everything except the token is optional; the defaults above are what the code uses anyway.
+Only the token is required. **Do not set `PORT` or `HOST`** — those are for running it
+locally; Vercel does not use them.
 
-**Do not set `PORT` or `HOST` on Render.** Render sets `PORT` itself and the server reads it.
-Render also sets `RENDER`, which is how the server knows to bind `0.0.0.0` instead of
-loopback. Setting `PORT` by hand is the usual reason a Node service on Render never passes
-its health check.
+Changing an environment variable does not affect deployments that are already running.
+**Redeploy after changing one**, from the Deployments tab, or the old value stays live.
 
-### Testing the deployed URL
+### Function duration
 
-With `https://YOUR-SERVICE.onrender.com` in place of the placeholder:
+`api/continue.js` is capped at 60 seconds. Vercel's own limit on Hobby is 300, so 60 is a
+deliberate, tighter bound. Inside it, the code gives up at **30 seconds**
+(`TURN_TIMEOUT_MS`) and answers with a sentence saying so. That ordering is the point: if
+the platform killed the function first you would get an opaque gateway error with nothing
+in it a visitor could read. Real turns land around **1.7 seconds**.
 
-1. **Is it up and is the token loaded?**
+### Deploy and test
+
+1. **Import** the repository at <https://vercel.com/new> and deploy.
+2. **Is the token loaded?**
    ```bash
-   curl -s https://YOUR-SERVICE.onrender.com/api/status
+   curl -s https://YOUR-PROJECT.vercel.app/api/status
    # {"dancerCanAnswer":true,"model":"anthropic/claude-4.5-haiku"}
    ```
-   `false` means either no token, a token with a stray character in it, or
-   `MODEL_CALLS_ENABLED` switched off. The service log says which.
-2. **Does the interface load?** Open the URL. You should get the dancer and the five keys.
-3. **Does a real turn work?** Play four moves with the arrow keys and the space bar, press
-   **Dancer's turn**. Render's log prints one line per turn:
+   `false` means no token, a token with a stray character in it, or the stop switch on.
+3. **Does the interface load at the root?** Open the URL. You should get the dancer and the
+   five keys, not this file.
+4. **Does a real turn work?** Play four moves with the arrow keys and the space bar, then
+   press **Dancer's turn**. The function log in Vercel prints one line per turn:
    ```
-   [continue] ok    1736 ms   6 moves: step_right, bounce, spin, hold, pulse, jump
+   [continue] ok    1643 ms   5 moves: spin, step_right, pulse, bounce, hold
    ```
-4. **Does the stop switch work?** Set `MODEL_CALLS_ENABLED=false` and save. After the
-   restart, `/api/status` reports `dancerCanAnswer: false`, the page says the dancer's turn
-   is unavailable, and teaching and replay still work.
 
-The first visit after a quiet spell on the free tier takes 30–60 seconds while Render wakes
-the service. Nothing is broken; it is just cold.
+Any other Node host works too: `npm start` runs `dev-server.js`, which serves the same
+files and endpoints from one process.
 
 ## What the limits actually protect
 
 Be clear-eyed about this before handing the link to a class.
 
-**Every counter lives in memory, in one process.** There is no database. That means:
+**On Vercel the counters are weaker than they look.** Each function instance has its own
+memory, instances start and stop on demand, and several can run at once. So:
 
-- **A restart resets everything.** Deploys restart. Crashes restart. On the free tier the
-  service sleeps after about 15 minutes of no traffic and restarts on the next visit. Each
-  restart hands out a fresh `MAX_MODEL_CALLS`, a fresh hourly count, and fresh per-visitor
-  counts for everybody.
-- **"Per visitor" means per IP address**, taken from the first hop of `X-Forwarded-For`.
-  That is friction, not identity. Classmates behind one campus or building NAT may share a
-  limit and block each other; the same person on wifi and then on mobile data gets two
-  allowances. Anyone who wants to get around it can.
-- **If Render ever runs more than one instance**, each has its own counters, and the real
-  totals are multiplied by the number of instances.
+- **Every counter is per instance.** `MAX_CALLS_PER_HOUR=40` means forty per instance per
+  hour, not forty in total. Under load, Vercel may run several.
+- **A new instance starts at zero.** Cold starts, redeploys and scaling all reset the
+  counts.
+- **"Per visitor" means per IP address**, from the first hop of `X-Forwarded-For`, and only
+  on whichever instance handled the request. It is friction, not identity. Classmates behind
+  one campus NAT may share a limit; the same person on wifi and then on mobile data gets two
+  allowances.
 
-**What that costs in practice.** A turn is about **$0.001**. While the service stays up,
-`MAX_MODEL_CALLS=100` is the binding limit: roughly **10 cents per run**. The hourly
-ceiling of 40 works out to about **4 cents an hour** of continuous use. A class of twenty
-taking their 8 turns each is about **16 cents**. The uncomfortable case is many restarts
-over a long period, since each one starts the budget again.
+Treat these as a brake on ordinary over-use and accidental repeats — which they genuinely
+are — and not as a spending cap.
 
-**So the only limit that cannot be reset by a restart is the one on Replicate's side.**
-Before sharing the link, set a spend limit on your Replicate account. The controls in this
-repository are there to stop ordinary over-use and accidental double-clicks; they are not a
-substitute for a spending cap, and this README would be lying if it said otherwise.
+### The controls that do hold
 
-If something goes wrong, `MODEL_CALLS_ENABLED=false` stops new calls within one restart,
-and revoking the token at <https://replicate.com/account/api-tokens> stops them immediately.
+**Set a spend limit on Replicate.** This is the one ceiling no restart, cold start or extra
+instance can get past, and it costs nothing to turn on:
+<https://replicate.com/account/billing>. Do this before sharing the link.
+
+**Turn on Vercel's spend management** so function usage cannot surprise you either:
+<https://vercel.com/docs/spend-management>. For a static page and two small functions the
+free Hobby allowance is generous, but the alert is free.
+
+**Keep the stop switch to hand.** `MODEL_CALLS_ENABLED=false` plus a redeploy stops new
+calls. Revoking the token at <https://replicate.com/account/api-tokens> stops them
+instantly, and is the right move if something is actually wrong.
+
+**What a turn costs.** About **$0.001**. A class of twenty taking eight turns each is about
+**16 cents**. The numbers only get uncomfortable if the link escapes the class and the
+per-instance limits are the only thing standing in the way — which is exactly why the
+Replicate spend limit matters more than anything in this repository.
+
+### If you want limits that really hold
+
+Durable rate limiting needs somewhere to keep the count that outlives a single function
+instance — a Redis or KV store, added through the Vercel Marketplace, read and written on
+every turn. **I have not added one**, because it is another service to sign up for, another
+set of credentials to keep, and another thing that can fail in the middle of a class demo.
+Providers offer small free tiers that would comfortably cover a demo of this size; check
+current pricing before adding one, since it changes.
+
+For a class-sized audience, the spend limit plus the per-instance friction already here is
+the better trade. If the piece ever gets a wider audience, that is the moment to add the
+store.
 
 ### Duplicate turns
 
 Pressing **Dancer's turn** twice, or having the page open in two tabs, does not buy two
-model calls. The browser refuses to start a second request while one is running, and the
-server independently refuses any request from a visitor who already has one in flight,
-before it reaches Replicate. Both halves are covered by tests — including one that fires
-two handovers simultaneously and asserts exactly one call goes out.
+model calls.
+
+The reliable half is in the browser: the page refuses to start a second request while one is
+running, and hides the button during the dancer's turn. That covers the actual case — a
+double click, or an impatient second press — because both come from the same page.
+
+The server half is a backstop. It refuses any request from a caller who already has one in
+flight, before anything reaches Replicate, and releases that lock in a `finally` so a failed
+turn cannot strand them. On Vercel this only holds within one instance: two simultaneous
+requests routed to two instances would each see an empty lock. Tests cover both halves,
+including one that fires two handovers at once and asserts exactly one call goes out.
 
 ## The model, and what it costs
 
@@ -348,9 +406,12 @@ It never prints the token, and never prints the prompt.
 
 | file | what it does |
 | --- | --- |
-| `server.js` | serves `public/`, routes `/api/continue`, holds the token |
-| `phrase-api.js` | builds the prompt, calls Replicate, checks the answer is danceable |
+| `phrase-api.js` | `runTurn()` — the whole of a turn with no HTTP in it: prompt, Replicate call, checking the answer is danceable |
+| `api/continue.js` | the deployed endpoint; a thin wrapper around `runTurn()` |
+| `api/status.js` | the deployed endpoint that tells the page whether the dancer can answer |
+| `dev-server.js` | the local server behind `npm start`: serves `public/` and both endpoints from one process |
 | `limits.js` | who may ask for a turn and how often, and the stop switch (no DOM, tested) |
+| `vercel.json` | output directory and function durations |
 | `public/js/phrase.js` | the moves, reading a phrase, checking a continuation (no DOM, tested) |
 | `public/js/main.js` | the state machine: teaching, thinking, the dancer's turn, and after |
 | `public/js/input.js` | the five keys and the five buttons |
@@ -359,7 +420,7 @@ It never prints the token, and never prints the prompt.
 | `public/js/score.js` | writing a phrase down so two can be read against each other |
 | `public/js/log.js` | the request log under "Development details" |
 | `public/pose.html` | a scratch page that draws the figure in each pose, for working on the drawing |
-| `test/` | `phrase`, `limits` and `server` suites — none of them call Replicate |
+| `test/` | `phrase`, `limits`, `server` and `vercel-functions` suites — none of them call Replicate |
 
 `public/pose.html` takes `?moves=jump@0.5,drop@0.85` — a move, and optionally how far
 through it to freeze — which is the quickest way to look at an animation you are changing.

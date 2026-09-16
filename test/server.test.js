@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { createServer } from "../server.js";
+import { createServer } from "../dev-server.js";
 import { parseTurn, buildPrompt } from "../phrase-api.js";
 
 const TOKEN = "r8_test_token_not_real";
