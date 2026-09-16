@@ -1,0 +1,10 @@
+# Secrets: never commit these
+.env
+.env.local
+
+node_modules/
+.DS_Store
+npm-debug.log*
+
+# Local preview renders, not part of the piece
+previews/

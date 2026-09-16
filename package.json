@@ -1,0 +1,14 @@
+{
+  "name": "learning-the-steps",
+  "version": "0.1.0",
+  "description": "Tap a rhythm, change it, and watch whether a dancer driven by a language model can keep up.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.12"
+  }
+}

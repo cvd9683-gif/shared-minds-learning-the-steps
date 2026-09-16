@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Learning the Steps, Feeling the Dance</title>
+  <link rel="icon" href="data:,">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=Big+Shoulders+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Learning the Steps, <span>Feeling the Dance</span></h1>
+  </header>
+
+  <p id="whose-turn" class="whose-turn" data-who="you"><span id="whose-turn-word">Your turn</span></p>
+
+  <main class="stage">
+    <section class="floor" aria-label="The dancer">
+      <div id="dancer" class="dancer"></div>
+      <p class="caption" aria-live="polite">
+        <span id="move-name" class="move-name">waiting</span>
+        <span id="move-who" class="move-who"></span>
+      </p>
+    </section>
+
+    <section class="instrument" aria-label="Play a phrase">
+      <p class="instruction">
+        Play 4&ndash;8 moves in a rhythm.
+        <span>Then press <b>&ldquo;Dancer&rsquo;s turn&rdquo;</b> to see what it does next.</span>
+      </p>
+
+      <div id="pad" class="pad" role="group" aria-label="Moves"></div>
+
+      <p id="progress" class="progress" aria-live="polite"></p>
+
+      <div class="actions">
+        <button id="hand-over" class="act primary" type="button" disabled>Dancer&rsquo;s turn</button>
+        <button id="replay" class="act" type="button" hidden>Play my phrase back</button>
+        <button id="again" class="act" type="button" hidden>Teach another phrase</button>
+        <button id="try-next" class="act ghost" type="button" hidden>Try my next phrase</button>
+        <button id="start-over" class="act ghost" type="button" hidden>Start over</button>
+      </div>
+
+      <p id="ai-note" class="ai-note" hidden>AI turn unavailable in this local copy.</p>
+      <p id="status-line" class="status" hidden><span id="lamp" class="lamp"></span><span id="status"></span></p>
+    </section>
+  </main>
+
+  <section class="turn" aria-label="The phrases">
+    <div class="turn-head">
+      <h2 id="turn-title">Your phrase</h2>
+      <p id="turn-note" class="turn-note"></p>
+    </div>
+
+    <div class="staves">
+      <div class="stave-row" id="row-you">
+        <h3 id="label-you">You played</h3>
+        <div id="stave-you" class="stave" aria-live="polite"></div>
+      </div>
+      <div class="stave-row" id="row-dancer" hidden>
+        <h3><span class="dot"></span>The dancer tried</h3>
+        <div id="stave-dancer" class="stave"></div>
+        <p id="dancer-read" class="read"></p>
+      </div>
+      <div class="stave-row" id="row-next" hidden>
+        <h3>What you actually did next</h3>
+        <div id="stave-next" class="stave"></div>
+        <p id="compare-note" class="read"></p>
+      </div>
+    </div>
+  </section>
+
+  <details class="how">
+    <summary>How this works</summary>
+    <div class="how-text">
+      <p>You and the dancer take turns.</p>
+      <p><b>Your turn.</b> Every move you play is recorded with the time you played it, to the millisecond. The dancer mirrors you as you go, so the keys feel like an instrument rather than a form. The gaps between your moves <i>are</i> the phrase: a pause you leave in the middle is kept exactly as you left it, and nothing is treated as the end of your turn until you hand it over.</p>
+      <p><b>The dancer's turn.</b> Your phrase goes to a language model as a list of moves and the gap in milliseconds before each one — numbers and names, nothing else. It never sees the dancer, or you. It answers with the phrase it would dance back, at its own timing, and the dancer performs that on its own. It can reach for three moves you have no key for: spin, bounce and hold.</p>
+      <p>Both phrases are written out above at the same scale, so you can read one against the other: which moves, and how far apart.</p>
+      <p><b>Try my next phrase</b> is the honest version of the question. The model proposed a continuation without knowing what you intended; playing what you would really have done next puts the two side by side. It is an experiment, not a score — there is no right answer to guess at.</p>
+    </div>
+  </details>
+
+  <details class="dev">
+    <summary>Development details</summary>
+    <div class="dev-body">
+      <div class="dev-text">
+        <p id="dev-setup" class="dev-setup"></p>
+        <p>The request goes to a small local server, which holds the API token so this page never sees it. The log records what went out, what came back, and how long it took. Setup is in the <b>README</b>.</p>
+      </div>
+      <div class="dev-log">
+        <div class="log-head">
+          <p>Requests</p>
+          <div class="test-tools">
+            <label><input type="checkbox" id="test-delay"> Test: answer 4 s late</label>
+            <label><input type="checkbox" id="test-fail"> Test: make requests fail</label>
+          </div>
+        </div>
+        <ol id="log" class="log"></ol>
+      </div>
+    </div>
+  </details>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
