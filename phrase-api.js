@@ -25,11 +25,29 @@ export function tokenProblem(token) {
   const where = bad
     .map(({ at, code }) => `position ${at} (U+${code.toString(16).toUpperCase().padStart(4, "0")})`)
     .join(", ");
-  return `The token in .env has ${bad.length} character${bad.length === 1 ? "" : "s"} `
+  return `REPLICATE_API_TOKEN has ${bad.length} character${bad.length === 1 ? "" : "s"} `
     + `that cannot be sent in a request, out of ${token.length}: ${where}. `
     + `These are usually Cyrillic letters that look identical to Latin ones, picked up `
     + `when the token was copied. Copy it again with the Copy button at `
-    + `https://replicate.com/account/api-tokens and write .env again.`;
+    + `https://replicate.com/account/api-tokens and set it again — in .env locally, or in `
+    + `your host's environment variables.`;
+}
+
+// Read the token the one way, everywhere: trimmed, because a trailing newline
+// from a paste is an ordinary accident.
+export function readToken(env = process.env) {
+  return env.REPLICATE_API_TOKEN?.trim() || "";
+}
+
+// Can the dancer actually take a turn with this token?
+//
+// /api/status and /api/continue used to disagree about this: status asked only
+// whether a token existed, while a turn also checked whether it could be put in
+// a request. A token with a look-alike letter in it therefore reported the
+// dancer as available and then failed at the button. One definition, used by
+// both, is the fix.
+export function tokenUsable(token) {
+  return Boolean(token) && tokenProblem(token) === null;
 }
 
 const VOCABULARY = ALL_MOVES.map((m) => `${m} (${MOVES[m].hint})`).join(", ");

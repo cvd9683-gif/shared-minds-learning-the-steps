@@ -187,3 +187,61 @@ test("the stop switch is honoured by the deployed function too", async () => {
   });
   delete process.env.MODEL_CALLS_ENABLED;
 });
+
+test("status and a turn agree about whether the token is usable", async () => {
+  // The bug this pins down: /api/status reported the dancer as available while a
+  // turn refused the same token, so the page invited people to press a button
+  // that could not work. Each token below is run through both endpoints and the
+  // two answers have to match.
+  const cases = [
+    { what: "a clean token", token: "r8_" + "a".repeat(37), usable: true },
+    { what: "no token at all", token: undefined, usable: false },
+    { what: "an empty token", token: "", usable: false },
+    { what: "only whitespace", token: "   \n", usable: false },
+    // The real failure: Cyrillic М and В, identical on screen to Latin M and B.
+    { what: "a Cyrillic look-alike inside", token: "r8_abcdefghijМlmnopqrstuvwxyz012345678", usable: false },
+    { what: "an interior newline", token: "r8_abcdefghij\nlmnopqrstuvwxyz012345678", usable: false },
+    { what: "a zero-width space", token: "r8_abcdefghij​lmnopqrstuvwxyz012345678", usable: false },
+  ];
+
+  for (const c of cases) {
+    if (c.token === undefined) delete process.env.REPLICATE_API_TOKEN;
+    else process.env.REPLICATE_API_TOKEN = c.token;
+
+    const status = (await load("../api/status.js")).default;
+    const sr = res();
+    status(req({ method: "GET" }), sr);
+
+    const turn = (await load("../api/continue.js")).default;
+    const tr = res();
+    await turn(req(), tr);
+    // A usable token gets past the token check; an unusable one is refused there.
+    const turnAcceptedToken = tr.out.code !== 500;
+
+    assert.equal(sr.out.payload.dancerCanAnswer, c.usable, `status, for ${c.what}`);
+    assert.equal(turnAcceptedToken, c.usable, `the turn, for ${c.what}`);
+    assert.equal(
+      sr.out.payload.dancerCanAnswer, turnAcceptedToken,
+      `status and the turn must agree about ${c.what}`,
+    );
+    // Whatever went wrong, no part of the value comes back out.
+    if (c.token) assert.doesNotMatch(JSON.stringify([sr.out.payload, tr.out.payload]), /r8_abcdefghij/);
+  }
+  delete process.env.REPLICATE_API_TOKEN;
+});
+
+test("an unusable token is named by position and codepoint, never by its characters", async () => {
+  process.env.REPLICATE_API_TOKEN = "r8_abcdefghijМlmnopВqrstuvwxyz0123456";
+  const turn = (await load("../api/continue.js")).default;
+  const r = res();
+  await turn(req(), r);
+  assert.equal(r.out.code, 500);
+  assert.match(r.out.payload.error, /token is not usable/);
+  assert.match(r.out.payload.setup, /2 characters/);
+  assert.match(r.out.payload.setup, /position 14 \(U\+041C\)/);
+  assert.match(r.out.payload.setup, /position 20 \(U\+0412\)/);
+  // It no longer claims the value lives in .env, which is wrong on a host.
+  assert.match(r.out.payload.setup, /REPLICATE_API_TOKEN/);
+  assert.doesNotMatch(r.out.payload.setup, /abcdefghij/);
+  delete process.env.REPLICATE_API_TOKEN;
+});

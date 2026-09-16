@@ -10,7 +10,7 @@
 // ordinary over-use from one warm instance, and they are NOT a spending cap.
 // The README says so at greater length, and points at the control that is one.
 
-import { runTurn, visitorKey } from "../phrase-api.js";
+import { runTurn, visitorKey, readToken } from "../phrase-api.js";
 import { createLimiter, callsEnabled } from "../limits.js";
 
 const num = (name, fallback) => Number(process.env[name]) || fallback;
@@ -41,7 +41,7 @@ export default async function handler(request, response) {
   const result = await runTurn({
     body,
     visitor: visitorKey(request),
-    token: process.env.REPLICATE_API_TOKEN?.trim(),
+    token: readToken(process.env),
     apiBase: process.env.REPLICATE_API_BASE,
     limiter,
     enabled: () => callsEnabled(process.env.MODEL_CALLS_ENABLED),

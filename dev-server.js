@@ -8,7 +8,7 @@ import http from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createContinueHandler, MODEL, tokenProblem } from "./phrase-api.js";
+import { createContinueHandler, MODEL, tokenProblem, readToken, tokenUsable } from "./phrase-api.js";
 import { createLimiter, callsEnabled } from "./limits.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -50,7 +50,7 @@ export function createServer(options = {}) {
       // Only ever a yes/no and a model name. Nothing here is derived from the
       // token beyond whether one exists.
       return send(res, 200, "application/json", JSON.stringify({
-        dancerCanAnswer: Boolean(options.token) && enabled(),
+        dancerCanAnswer: tokenUsable(options.token) && enabled(),
         model: MODEL,
       }));
     }
@@ -73,7 +73,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   // A trailing newline from a paste is normal and harmless; trim it. Anything
   // else odd inside the token is reported rather than quietly repaired.
-  const token = process.env.REPLICATE_API_TOKEN?.trim();
+  const token = readToken(process.env);
 
   const num = (name, fallback) => Number(process.env[name]) || fallback;
   const limits = {
