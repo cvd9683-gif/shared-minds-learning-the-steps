@@ -9,6 +9,14 @@ A small web instrument for taking turns with a dancer. Made for ITP's Shared Min
 > back — the page says so plainly and never invents an answer. See
 > [Run it](#run-it) below.
 
+![The phrase a person played, written above the dancer's answer, both drawn at the same scale on one timeline](docs/preview.png)
+
+*One real turn.* **Played:** step left · beat · jump · **905 ms pause** · drop low · step
+right · beat. **Answered:** step right · bounce · spin — with a **950 ms pause** of its own
+before the spin — then hold · beat · jump. Both are drawn at the same scale, so the long
+rest in each lines up against the other. Three of the dancer's six moves are ones the
+keyboard cannot play.
+
 You play four to eight moves in whatever rhythm you like. Every move is recorded with the
 moment you played it, to the millisecond, and the dancer mirrors you as you go. When you
 hand the turn over, your phrase — the moves, and the gaps between them — goes to a
@@ -84,7 +92,7 @@ You need Node 20.12 or newer (`node -v`). There is nothing to install: no depend
 no build step, no framework.
 
 ```bash
-git clone https://github.com/cvd9683-gif/learning-the-steps.git
+git clone https://github.com/cvd9683-gif/shared-minds-learning-the-steps.git
 cd learning-the-steps
 npm start                     # http://localhost:3000
 ```
