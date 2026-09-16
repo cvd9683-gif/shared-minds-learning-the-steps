@@ -4,10 +4,17 @@ A small web instrument for taking turns with a dancer. Made for ITP's Shared Min
 
 **You teach it a phrase. It answers with one of its own.**
 
-> **Running it needs your own Replicate API token and a few cents of credit** for the
-> dancer to take its turn. Without one, you can still teach a phrase and watch it played
-> back — the page says so plainly and never invents an answer. See
-> [Run it](#run-it) below.
+## Try it
+
+**▶ [Open the demo](https://cvd9683-gif.github.io/shared-minds-learning-the-steps/)**
+
+Teach the dancer a phrase with the arrow keys and the space bar, and play it back. This
+demo is a static page with no server behind it, so the **dancer cannot take its own turn**
+— that half needs a model, and a model needs an API key that must never be handed to a
+browser. The page says so where the button is, rather than pretending.
+
+For the whole thing, including the dancer answering you, run it yourself in one command —
+see [Run it](#run-it) — or put it on a host, which is [a short section away](#putting-it-online-render).
 
 ![The phrase a person played, written above the dancer's answer, both drawn at the same scale on one timeline](docs/preview.png)
 
